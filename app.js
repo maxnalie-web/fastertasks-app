@@ -1,10 +1,24 @@
-// Basic config
 const CONTRACT_ADDRESS = "0x5571d4b93eB7469BaA0d41dCFf4A42944b830A33";
-const BASE_RPC_URL = "https://mainnet.base.org";
+const BASE_CHAIN_ID_HEX = "0x2105"; // 8453
+const ETH_USD_PRICE = 3000;
 
-// Minimal ABI for FasterTasks-style contract
+// Minimal ABI for the described contract interface.
+// Adjust if the on-chain ABI differs.
 const CONTRACT_ABI = [
-  // Views
+  {
+    inputs: [],
+    name: "owner",
+    outputs: [{ internalType: "address", name: "", type: "address" }],
+    stateMutability: "view",
+    type: "function"
+  },
+  {
+    inputs: [],
+    name: "verifier",
+    outputs: [{ internalType: "address", name: "", type: "address" }],
+    stateMutability: "view",
+    type: "function"
+  },
   {
     inputs: [],
     name: "nextTaskId",
@@ -16,12 +30,11 @@ const CONTRACT_ABI = [
     inputs: [{ internalType: "uint256", name: "", type: "uint256" }],
     name: "tasks",
     outputs: [
-      { internalType: "address", name: "creator", type: "address" },
-      { internalType: "address", name: "token", type: "address" },
-      { internalType: "uint256", name: "remainingReward", type: "uint256" },
+      { internalType: "uint8", name: "taskType", type: "uint8" },
       { internalType: "uint256", name: "maxParticipants", type: "uint256" },
       { internalType: "uint256", name: "participantsPaid", type: "uint256" },
-      { internalType: "bool", name: "isActive", type: "bool" }
+      { internalType: "uint256", name: "remainingReward", type: "uint256" },
+      { internalType: "bool", name: "active", type: "bool" }
     ],
     stateMutability: "view",
     type: "function"
@@ -35,23 +48,14 @@ const CONTRACT_ABI = [
   },
   {
     inputs: [],
-    name: "owner",
-    outputs: [{ internalType: "address", name: "", type: "address" }],
-    stateMutability: "view",
+    name: "withdrawNative",
+    outputs: [],
+    stateMutability: "nonpayable",
     type: "function"
   },
-  {
-    inputs: [],
-    name: "verifierWallet",
-    outputs: [{ internalType: "address", name: "", type: "address" }],
-    stateMutability: "view",
-    type: "function"
-  },
-
-  // Writes
   {
     inputs: [{ internalType: "uint256", name: "maxParticipants", type: "uint256" }],
-    name: "createTaskNative",
+    name: "createNativeTask",
     outputs: [{ internalType: "uint256", name: "taskId", type: "uint256" }],
     stateMutability: "payable",
     type: "function"
@@ -62,598 +66,734 @@ const CONTRACT_ABI = [
       { internalType: "address", name: "user", type: "address" },
       { internalType: "uint256", name: "amount", type: "uint256" }
     ],
-    name: "allocateReward",
-    outputs: [],
-    stateMutability: "nonpayable",
-    type: "function"
-  },
-  {
-    inputs: [],
-    name: "withdrawNative",
+    name: "allocateNativeReward",
     outputs: [],
     stateMutability: "nonpayable",
     type: "function"
   }
 ];
 
-// Basic state
-let readProvider;
-let readContract;
+const state = {
+  provider: null,
+  signer: null,
+  contract: null,
+  address: null,
+  owner: null,
+  verifier: null,
+  isOwner: false,
+  isVerifier: false,
+  tasks: [],
+  selectedTask: null,
+  nativeBalanceWei: 0n
+};
 
-let web3Provider;
-let signer;
-let writeContract;
-let currentAccount = null;
-let ownerAddress = null;
-let verifierAddress = null;
+// UI helpers
 
-// Simple mock metadata per task id (off-chain)
-// Later you can replace this with a backend API.
-function getMockTaskMeta(taskId) {
-  const types = ["Follow account", "Boost cast"];
-  const type = types[Number(taskId) % types.length];
-
-  let howToEarn =
-    "Follow the creator account in the Farcaster frame, then tap Verify.";
-  if (type === "Boost cast") {
-    howToEarn =
-      "Like and recast the target cast, then tap Verify in the frame.";
-  }
-
-  return {
-    type,
-    howToEarn
-  };
+function $(id) {
+  return document.getElementById(id);
 }
 
-// Utility: small toast
-function showToast(message, isError = false) {
-  const toast = document.getElementById("toast");
-  toast.textContent = message;
-  toast.style.borderColor = isError ? "rgba(248,113,113,0.9)" : "";
-  toast.style.color = isError ? "#fecaca" : "";
-  toast.classList.remove("hidden");
-  setTimeout(() => toast.classList.add("hidden"), 2600);
+function shortenAddress(address) {
+  if (!address) return "";
+  return `${address.slice(0, 6)}…${address.slice(-4)}`;
 }
 
-// Shorten address
-function shortAddress(addr) {
-  if (!addr) return "";
-  return addr.slice(0, 6) + "..." + addr.slice(-4);
-}
-
-// Format ETH from wei (BigInt)
-function formatEth(value) {
-  if (value === null || value === undefined) return "0.0";
+function formatEth(weiBigNumberish, decimals = 4) {
   try {
-    const eth = ethers.formatEther(value);
-    const num = Number(eth);
-    if (num === 0) return "0.0";
-    if (num < 0.0001) return num.toExponential(2);
-    if (num < 1) return num.toFixed(4);
-    return num.toFixed(4);
+    const ethStr = ethers.formatEther(weiBigNumberish);
+    const num = Number(ethStr);
+    if (Number.isNaN(num)) return "0.0000";
+    return num.toFixed(decimals);
   } catch {
-    return "0.0";
+    return "0.0000";
   }
 }
 
-// Very rough USD estimation for UI only (no live price)
-const STATIC_ETH_PRICE = 3000;
-function formatUsdApprox(ethString) {
-  const num = Number(ethString);
-  if (!num || num <= 0) return "~$0";
-  const usd = num * STATIC_ETH_PRICE;
-  if (usd < 1) return "~$" + usd.toFixed(2);
-  if (usd < 1000) return "~$" + usd.toFixed(2);
-  return "~$" + usd.toFixed(0);
+function formatUsd(ethAmount) {
+  const num = Number(ethAmount);
+  if (Number.isNaN(num)) return "$0.00";
+  const usd = num * ETH_USD_PRICE;
+  return `$${usd.toFixed(2)}`;
 }
 
-// Init read provider & contract (no wallet needed)
-async function initRead() {
-  readProvider = new ethers.JsonRpcProvider(BASE_RPC_URL);
-  readContract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, readProvider);
+function showToast(message, type = "info", title) {
+  const container = $("toast-container");
+  if (!container) return;
+  const toast = document.createElement("div");
+  toast.className = `toast toast-${type}`;
+  const toastTitle = document.createElement("div");
+  toastTitle.className = "toast-title";
+  toastTitle.textContent =
+    title || (type === "success" ? "Success" : type === "error" ? "Error" : "Notice");
+  const toastMessage = document.createElement("div");
+  toastMessage.className = "toast-message";
+  toastMessage.textContent = message;
+  toast.appendChild(toastTitle);
+  toast.appendChild(toastMessage);
+  container.appendChild(toast);
+  setTimeout(() => {
+    toast.style.opacity = "0";
+    toast.style.transform = "translateY(6px)";
+    setTimeout(() => {
+      toast.remove();
+    }, 180);
+  }, 3400);
+}
+
+function setButtonLoading(button, isLoading, labelWhenDone) {
+  if (!button) return;
+  if (isLoading) {
+    button.dataset.prevLabel = button.textContent;
+    button.textContent = "Processing…";
+    button.disabled = true;
+  } else {
+    button.textContent = labelWhenDone || button.dataset.prevLabel || button.textContent;
+    button.disabled = false;
+  }
+}
+
+// Task helpers
+
+const HOW_TO_EARN_COPY = {
+  follow: [
+    "Follow the specified account and keep notifications enabled for at least 24 hours.",
+    "Tap the follow button on the target profile and keep the follow active.",
+    "Follow the account, then engage with at least one recent post."
+  ],
+  boost: [
+    "Boost the specified cast so it reaches a wider audience.",
+    "Quote the cast with a short, relevant comment to help discovery.",
+    "Boost the cast and keep it visible on your profile for at least 1 hour."
+  ]
+};
+
+function randomHowTo(taskTypeLabel) {
+  const key = taskTypeLabel === "Follow account" ? "follow" : "boost";
+  const pool = HOW_TO_EARN_COPY[key];
+  const index = Math.floor(Math.random() * pool.length);
+  return pool[index];
+}
+
+function mapTaskType(typeIndex) {
+  const idx = Number(typeIndex);
+  if (idx === 1) return "Boost cast";
+  return "Follow account";
+}
+
+function generateMockParticipants(participantsPaid, maxParticipants) {
+  const participants = [];
+  const total = Math.min(maxParticipants, Math.max(4, participantsPaid + 3));
+  for (let i = 0; i < total; i += 1) {
+    const isPaid = i < participantsPaid;
+    const base = "0x";
+    const addr =
+      base +
+      Math.random().toString(16).slice(2, 10) +
+      Math.random().toString(16).slice(2, 10);
+    const minutesLeft = Math.floor(Math.random() * 25) + 5;
+    participants.push({
+      address: addr,
+      status: isPaid ? "paid" : "pending",
+      minutesLeft: isPaid ? 0 : minutesLeft
+    });
+  }
+  return participants;
+}
+
+// Blockchain connection
+
+async function ensureProviderOnBase() {
+  if (!window.ethereum) {
+    throw new Error("No injected wallet found. Install a wallet like MetaMask.");
+  }
+
+  const provider = new ethers.BrowserProvider(window.ethereum);
+  const network = await provider.getNetwork();
+  if (!network || network.chainId !== 8453n) {
+    try {
+      await window.ethereum.request({
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: BASE_CHAIN_ID_HEX }]
+      });
+    } catch (err) {
+      if (err && err.code === 4902) {
+        await window.ethereum.request({
+          method: "wallet_addEthereumChain",
+          params: [
+            {
+              chainId: BASE_CHAIN_ID_HEX,
+              chainName: "Base",
+              nativeCurrency: {
+                name: "Ether",
+                symbol: "ETH",
+                decimals: 18
+              },
+              rpcUrls: ["https://mainnet.base.org"],
+              blockExplorerUrls: ["https://basescan.org"]
+            }
+          ]
+        });
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  return new ethers.BrowserProvider(window.ethereum);
+}
+
+async function connectWallet() {
+  const connectButton = $("connect-button");
+  const labelSpan = $("connect-button-label");
+  try {
+    setButtonLoading(connectButton, true);
+    labelSpan.textContent = "Connecting…";
+
+    const provider = await ensureProviderOnBase();
+    const accounts = await provider.send("eth_requestAccounts", []);
+    if (!accounts || accounts.length === 0) {
+      throw new Error("Wallet connection rejected.");
+    }
+
+    const signer = await provider.getSigner();
+    const address = await signer.getAddress();
+    const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer);
+
+    state.provider = provider;
+    state.signer = signer;
+    state.contract = contract;
+    state.address = address;
+
+    $("wallet-address").textContent = shortenAddress(address);
+    labelSpan.textContent = "Connected";
+    connectButton.disabled = false;
+
+    await Promise.all([loadRolesAndPermissions(), loadUserNativeBalance(), loadTasks()]);
+    showToast("Wallet connected on Base.", "success");
+  } catch (err) {
+    console.error(err);
+    showToast(
+      err && err.message ? err.message : "Failed to connect wallet.",
+      "error"
+    );
+    $("wallet-address").textContent = "Not connected";
+    $("connect-button-label").textContent = "Connect wallet";
+  } finally {
+    setButtonLoading(connectButton, false, "Connected");
+  }
+}
+
+async function loadRolesAndPermissions() {
+  const rolePill = $("role-pill");
+  const adminBadge = $("admin-badge");
+  const ownerSpan = $("owner-address");
+  const verifierSpan = $("verifier-address");
+  const createBtn = $("create-task-button");
+  const allocateBtn = $("allocate-reward-button");
+
+  if (!state.contract || !state.address) return;
 
   try {
-    ownerAddress = await readContract.owner();
-    verifierAddress = await readContract.verifierWallet();
-  } catch (e) {
-    console.error("Failed to read owner/verifier:", e);
+    const [owner, verifier] = await Promise.all([
+      state.contract.owner(),
+      state.contract.verifier()
+    ]);
+
+    state.owner = owner;
+    state.verifier = verifier;
+
+    const lowerUser = state.address.toLowerCase();
+    state.isOwner = owner && owner.toLowerCase() === lowerUser;
+    state.isVerifier = verifier && verifier.toLowerCase() === lowerUser;
+
+    const role = state.isOwner
+      ? "Owner"
+      : state.isVerifier
+      ? "Verifier"
+      : "Participant";
+
+    rolePill.textContent = role;
+    if (state.isOwner || state.isVerifier) {
+      adminBadge.textContent = `Admin: ${role}`;
+      adminBadge.style.borderColor = "rgba(56, 189, 248, 0.9)";
+      adminBadge.style.color = "#5eead4";
+      createBtn.disabled = false;
+      allocateBtn.disabled = false;
+    } else {
+      adminBadge.textContent = "Wallet is not owner / verifier";
+      createBtn.disabled = true;
+      allocateBtn.disabled = true;
+    }
+
+    ownerSpan.textContent = owner ? shortenAddress(owner) : "Unknown";
+    verifierSpan.textContent = verifier ? shortenAddress(verifier) : "Unknown";
+  } catch (err) {
+    console.error(err);
+    showToast("Failed to load contract roles.", "error");
   }
 }
 
-// Connect wallet
-async function connectWallet() {
-  const btn = document.getElementById("connectButton");
+async function loadUserNativeBalance() {
+  const small = $("reward-balance-small");
+  const large = $("reward-balance-large");
+  const usd = $("reward-balance-usd");
+  const withdrawBtn = $("withdraw-button");
 
-  if (!window.ethereum) {
-    showToast("No wallet detected. Install MetaMask or a compatible wallet.", true);
+  if (!state.contract || !state.address) {
+    small.textContent = "0.00 ETH";
+    large.textContent = "0.0000 ETH";
+    usd.textContent = "$0.00";
+    withdrawBtn.disabled = true;
     return;
   }
 
   try {
-    btn.disabled = true;
-    btn.textContent = "Connecting...";
+    const bal = await state.contract.nativeBalances(state.address);
+    state.nativeBalanceWei = bal;
+    const eth = formatEth(bal, 4);
+    const ethSmall = formatEth(bal, 2);
 
-    // Request accounts
-    const accounts = await window.ethereum.request({
-      method: "eth_requestAccounts"
-    });
-    if (!accounts || !accounts.length) {
-      throw new Error("No account selected");
-    }
-    currentAccount = ethers.getAddress(accounts[0]);
-
-    // Ensure Base network (8453)
-    const chainIdHex = await window.ethereum.request({ method: "eth_chainId" });
-    if (chainIdHex !== "0x2105") {
-      try {
-        await window.ethereum.request({
-          method: "wallet_switchEthereumChain",
-          params: [{ chainId: "0x2105" }]
-        });
-      } catch (switchError) {
-        // Try to add Base if not available
-        try {
-          await window.ethereum.request({
-            method: "wallet_addEthereumChain",
-            params: [
-              {
-                chainId: "0x2105",
-                chainName: "Base",
-                nativeCurrency: {
-                  name: "Ether",
-                  symbol: "ETH",
-                  decimals: 18
-                },
-                rpcUrls: ["https://mainnet.base.org"],
-                blockExplorerUrls: ["https://basescan.org"]
-              }
-            ]
-          });
-        } catch (addError) {
-          console.warn("Failed to add/switch Base network", addError);
-        }
-      }
-    }
-
-    web3Provider = new ethers.BrowserProvider(window.ethereum);
-    signer = await web3Provider.getSigner();
-    writeContract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer);
-
-    btn.textContent = shortAddress(currentAccount);
-    btn.classList.add("btn-secondary");
-
-    showToast("Wallet connected");
-    await refreshAll();
-    wireAdminRoleLabel();
-  } catch (e) {
-    console.error(e);
-    showToast("Failed to connect wallet", true);
-    btn.textContent = "Connect wallet";
-  } finally {
-    btn.disabled = false;
+    small.textContent = `${ethSmall} ETH`;
+    large.textContent = `${eth} ETH`;
+    usd.textContent = formatUsd(eth);
+    withdrawBtn.disabled = Number(eth) <= 0;
+  } catch (err) {
+    console.error(err);
+    showToast("Failed to load reward balance.", "error");
   }
 }
 
-// Refresh everything that depends on chain
-async function refreshAll() {
-  await Promise.all([loadTasks(), loadNativeBalance()]);
-}
-
-// Load tasks from contract
 async function loadTasks() {
-  const listEl = document.getElementById("tasksList");
-  const emptyEl = document.getElementById("tasksEmpty");
+  const container = $("tasks-container");
+  if (!container) return;
 
-  listEl.innerHTML = "";
-  emptyEl.classList.add("hidden");
+  container.innerHTML = `
+    <div class="empty-state">
+      <p>Loading tasks from Base…</p>
+    </div>
+  `;
 
-  if (!readContract) return;
+  if (!state.contract) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <p>Connect your wallet to view available tasks.</p>
+      </div>
+    `;
+    return;
+  }
 
   try {
-    const total = await readContract.nextTaskId();
-    const totalNum = Number(total);
-    if (!totalNum || totalNum <= 0) {
-      emptyEl.classList.remove("hidden");
+    const nextIdBN = await state.contract.nextTaskId();
+    const nextId = Number(nextIdBN);
+    if (!Number.isFinite(nextId) || nextId === 0) {
+      container.innerHTML = `
+        <div class="empty-state">
+          <p>No tasks are currently available. Check back soon.</p>
+        </div>
+      `;
+      state.tasks = [];
       return;
     }
 
-    const indices = Array.from({ length: totalNum }, (_, i) => i);
-    const tasks = await Promise.all(
-      indices.map((i) => readContract.tasks(i))
-    );
+    const tasks = [];
+    for (let id = 0; id < nextId; id += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      const taskTuple = await state.contract.tasks(id);
+      const taskType = taskTuple.taskType ?? taskTuple[0];
+      const maxParticipants = taskTuple.maxParticipants ?? taskTuple[1];
+      const participantsPaid = taskTuple.participantsPaid ?? taskTuple[2];
+      const remainingReward = taskTuple.remainingReward ?? taskTuple[3];
+      const active = taskTuple.active ?? taskTuple[4];
 
-    let rendered = 0;
-    tasks.forEach((t, idx) => {
-      const isActive = t.isActive;
-      // You can change to show ended tasks too if you want
-      if (!isActive && Number(t.remainingReward) === 0) return;
+      if (!active) continue;
 
-      const taskId = idx;
-      const tokenAddress = t.token;
-      const remaining = t.remainingReward;
-      const maxParticipants = t.maxParticipants;
-      const participantsPaid = t.participantsPaid;
+      const typeLabel = mapTaskType(taskType);
+      const remainingEth = formatEth(remainingReward, 4);
+      const max = Number(maxParticipants);
+      const paid = Number(participantsPaid);
+      const howTo = randomHowTo(typeLabel);
 
-      const totalRewardEth = formatEth(remaining);
-      const usdApprox = formatUsdApprox(totalRewardEth);
+      tasks.push({
+        id,
+        taskTypeLabel: typeLabel,
+        howTo,
+        maxParticipants: max,
+        participantsPaid: paid,
+        remainingRewardWei: remainingReward,
+        remainingEth
+      });
+    }
 
-      const meta = getMockTaskMeta(taskId);
+    state.tasks = tasks;
 
-      const card = document.createElement("div");
+    if (tasks.length === 0) {
+      container.innerHTML = `
+        <div class="empty-state">
+          <p>No active tasks are available right now.</p>
+        </div>
+      `;
+      return;
+    }
+
+    container.innerHTML = "";
+    tasks.forEach((task) => {
+      const card = document.createElement("article");
       card.className = "task-card";
-      card.dataset.taskId = String(taskId);
+      card.dataset.taskId = String(task.id);
+
+      const completionRatio =
+        task.maxParticipants > 0 ? task.participantsPaid / task.maxParticipants : 0;
+      const completionPct = Math.min(100, Math.round(completionRatio * 100));
 
       card.innerHTML = `
-        <div class="task-header">
-          <div class="token-info">
-            <div class="token-logo">Ξ</div>
-            <div class="token-meta">
-              <div class="token-amount">${totalRewardEth} ETH</div>
-              <div class="token-symbol">Reward pool</div>
-              <div class="token-usd">${usdApprox}</div>
+        <div class="task-main-row">
+          <div class="token-chip">
+            <div class="token-logo">
+              <span class="token-symbol">Ξ</span>
+            </div>
+            <div class="token-text">
+              <span class="token-name">${task.taskTypeLabel}</span>
+              <span class="token-sub">Task #${task.id}</span>
             </div>
           </div>
-          <button class="btn btn-secondary verify-inline" data-verify-id="${taskId}">
-            Verify
-          </button>
+          <div class="task-reward">
+            <div class="task-reward-eth">${task.remainingEth} ETH</div>
+            <div class="task-reward-usd">${formatUsd(task.remainingEth)}</div>
+          </div>
         </div>
-        <div class="task-body">
-          <div class="how-to-earn-title">How to earn</div>
-          <div class="how-to-earn-text">${meta.howToEarn}</div>
-          <div class="task-type-row">
-            <div class="task-type-label">Task type</div>
-            <div class="task-type-value">${meta.type}</div>
+        <div class="task-meta-row">
+          <div class="task-info">
+            <div class="task-type-pill">
+              <span>${task.taskTypeLabel}</span>
+            </div>
+            <div class="task-how-to">${task.howTo}</div>
+            <div class="task-progress">
+              <div class="progress-bar">
+                <div class="progress-bar-fill" style="width: ${completionPct}%;"></div>
+              </div>
+              <div class="progress-text">${task.participantsPaid}/${task.maxParticipants}</div>
+            </div>
+          </div>
+          <div class="task-actions">
+            <button class="btn-ghost task-open-button">Details</button>
+            <button class="btn-primary task-verify-button">Verify</button>
           </div>
         </div>
       `;
 
-      // Click on card opens detail modal
-      card.addEventListener("click", (e) => {
-        // Don't treat inline verify button click as "open modal"
-        const target = e.target;
-        if (target && target.closest(".verify-inline")) return;
-        openTaskModal(taskId, {
-          tokenAddress,
-          remaining,
-          maxParticipants,
-          participantsPaid,
-          meta
-        });
+      const detailsBtn = card.querySelector(".task-open-button");
+      const verifyBtn = card.querySelector(".task-verify-button");
+
+      detailsBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openTaskModal(task.id);
       });
 
-      // Inline verify button (for now just show toast)
-      const verifyBtn = card.querySelector(".verify-inline");
       verifyBtn.addEventListener("click", (e) => {
         e.stopPropagation();
-        handleVerifyClick(taskId);
+        onVerifyClick(task.id);
       });
 
-      listEl.appendChild(card);
-      rendered++;
+      card.addEventListener("click", () => openTaskModal(task.id));
+
+      container.appendChild(card);
     });
-
-    if (!rendered) {
-      emptyEl.classList.remove("hidden");
-    }
-  } catch (e) {
-    console.error("Failed to load tasks:", e);
-    showToast("Failed to load tasks", true);
-    emptyEl.classList.remove("hidden");
-  }
-}
-
-// Load native balance for current user
-async function loadNativeBalance() {
-  const el = document.getElementById("nativeBalance");
-  if (!readContract || !currentAccount) {
-    el.textContent = "0.0";
-    return;
-  }
-
-  try {
-    const bal = await readContract.nativeBalances(currentAccount);
-    el.textContent = formatEth(bal);
-  } catch (e) {
-    console.error("Failed to load native balance:", e);
-    el.textContent = "0.0";
-  }
-}
-
-// Withdraw native rewards
-async function withdrawNative() {
-  if (!writeContract || !signer || !currentAccount) {
-    showToast("Connect wallet first", true);
-    return;
-  }
-
-  try {
-    const el = document.getElementById("withdrawNativeButton");
-    el.disabled = true;
-    el.textContent = "Withdrawing...";
-
-    const tx = await writeContract.withdrawNative();
-    showToast("Transaction sent...");
-
-    await tx.wait();
-    showToast("Withdrawal complete");
-    await loadNativeBalance();
-  } catch (e) {
-    console.error("Withdraw failed:", e);
-    showToast("Withdraw failed", true);
-  } finally {
-    const el = document.getElementById("withdrawNativeButton");
-    el.disabled = false;
-    el.textContent = "Withdraw to wallet";
-  }
-}
-
-// Admin: create native task
-async function createTaskNative() {
-  if (!writeContract || !signer || !currentAccount) {
-    showToast("Connect wallet first", true);
-    return;
-  }
-  if (!ownerAddress || currentAccount.toLowerCase() !== ownerAddress.toLowerCase()) {
-    showToast("Only owner can create tasks", true);
-    return;
-  }
-
-  const maxParticipantsInput = document.getElementById("createMaxParticipants");
-  const totalEthInput = document.getElementById("createTotalEth");
-
-  const maxParticipants = Number(maxParticipantsInput.value || "0");
-  const totalEth = Number(totalEthInput.value || "0");
-
-  if (!maxParticipants || maxParticipants <= 0) {
-    showToast("Max participants must be > 0", true);
-    return;
-  }
-  if (!totalEth || totalEth <= 0) {
-    showToast("Total reward must be > 0", true);
-    return;
-  }
-
-  try {
-    const value = ethers.parseEther(totalEth.toString());
-    const btn = document.getElementById("createTaskButton");
-    btn.disabled = true;
-    btn.textContent = "Creating...";
-
-    const tx = await writeContract.createTaskNative(maxParticipants, {
-      value
-    });
-    showToast("Transaction sent...");
-
-    const receipt = await tx.wait();
-    showToast("Task created");
-    await loadTasks();
-  } catch (e) {
-    console.error("Create task failed:", e);
-    showToast("Create task failed", true);
-  } finally {
-    const btn = document.getElementById("createTaskButton");
-    btn.disabled = false;
-    btn.textContent = "Create task (owner)";
-  }
-}
-
-// Admin: allocate reward
-async function allocateReward() {
-  if (!writeContract || !signer || !currentAccount) {
-    showToast("Connect wallet first", true);
-    return;
-  }
-  if (
-    !verifierAddress ||
-    currentAccount.toLowerCase() !== verifierAddress.toLowerCase()
-  ) {
-    showToast("Only verifier can allocate", true);
-    return;
-  }
-
-  const taskIdVal = Number(
-    document.getElementById("allocTaskId").value || "0"
-  );
-  const user = document.getElementById("allocUser").value.trim();
-  const amountEth = Number(
-    document.getElementById("allocAmount").value || "0"
-  );
-
-  if (!Number.isInteger(taskIdVal) || taskIdVal < 0) {
-    showToast("Task ID is invalid", true);
-    return;
-  }
-  if (!user || !ethers.isAddress(user)) {
-    showToast("User address is invalid", true);
-    return;
-  }
-  if (!amountEth || amountEth <= 0) {
-    showToast("Amount must be > 0", true);
-    return;
-  }
-
-  try {
-    const btn = document.getElementById("allocateButton");
-    btn.disabled = true;
-    btn.textContent = "Allocating...";
-
-    const amountWei = ethers.parseEther(amountEth.toString());
-    const tx = await writeContract.allocateReward(taskIdVal, user, amountWei);
-    showToast("Transaction sent...");
-
-    await tx.wait();
-    showToast("Reward allocated");
-    await Promise.all([loadTasks(), loadNativeBalance()]);
-  } catch (e) {
-    console.error("Allocate failed:", e);
-    showToast("Allocate failed", true);
-  } finally {
-    const btn = document.getElementById("allocateButton");
-    btn.disabled = false;
-    btn.textContent = "Allocate (verifier)";
-  }
-}
-
-// Wire admin role label
-function wireAdminRoleLabel() {
-  const tag = document.getElementById("adminRoleTag");
-  if (!currentAccount || !ownerAddress || !verifierAddress) {
-    tag.textContent = "Not owner / verifier";
-    return;
-  }
-
-  const addr = currentAccount.toLowerCase();
-  if (addr === ownerAddress.toLowerCase() && addr === verifierAddress.toLowerCase()) {
-    tag.textContent = "Owner & verifier";
-  } else if (addr === ownerAddress.toLowerCase()) {
-    tag.textContent = "Owner";
-  } else if (addr === verifierAddress.toLowerCase()) {
-    tag.textContent = "Verifier";
-  } else {
-    tag.textContent = "Not owner / verifier";
-  }
-}
-
-/* Task detail modal */
-
-function openTaskModal(taskId, data) {
-  const modal = document.getElementById("taskModal");
-  modal.classList.remove("hidden");
-
-  const tokenLabel = document.getElementById("modalTokenLabel");
-  const rewardLabel = document.getElementById("modalRewardLabel");
-  const typeLabel = document.getElementById("modalTaskType");
-  const howToEarnLabel = document.getElementById("modalHowToEarn");
-  const remainingLabel = document.getElementById("modalRemaining");
-  const maxLabel = document.getElementById("modalMaxParticipants");
-  const paidLabel = document.getElementById("modalParticipantsPaid");
-
-  const remainingEth = formatEth(data.remaining);
-  tokenLabel.textContent = "Reward token: ETH (Base)";
-  rewardLabel.textContent = `${remainingEth} ETH total remaining`;
-  typeLabel.textContent = data.meta.type;
-  howToEarnLabel.textContent = data.meta.howToEarn;
-  remainingLabel.textContent = remainingEth + " ETH";
-  maxLabel.textContent = String(data.maxParticipants);
-  paidLabel.textContent = String(data.participantsPaid);
-
-  // Participants list: mock data for now
-  const list = document.getElementById("modalParticipantsList");
-  list.innerHTML = "";
-
-  // Example placeholder data
-  const sample = [
-    {
-      address: currentAccount || "0x1234...abcd",
-      secondsLeft: 3600,
-      amountEth: "0.01",
-      paid: false
-    },
-    {
-      address: "0x9f27...c1b0",
-      secondsLeft: 0,
-      amountEth: "0.02",
-      paid: true
-    }
-  ];
-
-  sample.forEach((p) => {
-    const row = document.createElement("div");
-    row.className = "participant-row " + (p.paid ? "paid" : "pending");
-    const status = p.paid ? "Reward sent" : "Pending unlock";
-
-    row.innerHTML = `
-      <div class="participant-main">
-        <div class="participant-address">${p.address}</div>
-        <div class="participant-sub">${status}</div>
-      </div>
-      <div class="participant-meta">
-        <div>${p.amountEth} ETH</div>
-        <div>${
-          p.paid ? "0s" : Math.round(p.secondsLeft / 60) + " min left"
-        }</div>
+  } catch (err) {
+    console.error(err);
+    showToast("Failed to load tasks from contract.", "error");
+    container.innerHTML = `
+      <div class="empty-state">
+        <p>Unable to read tasks from the contract. Check your network and try again.</p>
       </div>
     `;
+  }
+}
 
-    list.appendChild(row);
+// Modal handling
+
+function openTaskModal(taskId) {
+  const task = state.tasks.find((t) => t.id === taskId);
+  if (!task) return;
+
+  state.selectedTask = task;
+
+  $("modal-task-type").textContent = task.taskTypeLabel;
+  $("modal-task-title").textContent = `Task #${task.id}`;
+  $("modal-task-id").textContent = String(task.id);
+  $("modal-how-to-earn").textContent = task.howTo;
+  $("modal-max-participants").textContent = String(task.maxParticipants);
+  $("modal-participants-paid").textContent = String(task.participantsPaid);
+
+  const remainingEth = task.remainingEth;
+  $("modal-reward-eth").textContent = `${remainingEth} ETH`;
+  $("modal-reward-usd").textContent = formatUsd(remainingEth);
+  $("modal-remaining-reward").textContent = `${remainingEth} ETH`;
+
+  const participantsContainer = $("modal-participants-list");
+  participantsContainer.innerHTML = "";
+
+  const mockParticipants = generateMockParticipants(
+    task.participantsPaid,
+    task.maxParticipants
+  );
+  mockParticipants.forEach((p) => {
+    const row = document.createElement("div");
+    row.className = "participant-row";
+
+    const main = document.createElement("div");
+    main.className = "participant-main";
+
+    const addrSpan = document.createElement("span");
+    addrSpan.className = "participant-address";
+    addrSpan.textContent = shortenAddress(p.address);
+
+    const metaSpan = document.createElement("span");
+    metaSpan.className = "participant-meta";
+    metaSpan.textContent =
+      p.status === "paid"
+        ? "Reward paid"
+        : `Waiting for verifier · ~${p.minutesLeft} min`;
+
+    main.appendChild(addrSpan);
+    main.appendChild(metaSpan);
+
+    const status = document.createElement("span");
+    status.className = `participant-status ${p.status}`;
+    status.textContent = p.status === "paid" ? "Paid" : "Pending";
+
+    row.appendChild(main);
+    row.appendChild(status);
+
+    participantsContainer.appendChild(row);
   });
 
-  const verifyButton = document.getElementById("modalVerifyButton");
-  verifyButton.onclick = () => {
-    handleVerifyClick(taskId);
-  };
+  $("task-modal").classList.remove("hidden");
 }
 
 function closeTaskModal() {
-  const modal = document.getElementById("taskModal");
-  modal.classList.add("hidden");
+  $("task-modal").classList.add("hidden");
+  state.selectedTask = null;
 }
 
-// Currently verify just shows a toast.
-// Later you would call your backend endpoint here.
-function handleVerifyClick(taskId) {
-  showToast("Verification will be handled by backend for task " + taskId);
+async function onVerifyClick(taskId) {
+  if (!state.contract || !state.address) {
+    showToast("Connect your wallet before verifying a task.", "error");
+    return;
+  }
+
+  const task = state.tasks.find((t) => t.id === taskId);
+  if (!task) {
+    showToast("Task not found.", "error");
+    return;
+  }
+
+  showToast(
+    "Verification request registered. The verifier will allocate rewards if approved.",
+    "info",
+    "Verification requested"
+  );
+}
+
+// Withdraw & admin actions
+
+async function onWithdrawClick() {
+  if (!state.contract || !state.address) {
+    showToast("Connect your wallet first.", "error");
+    return;
+  }
+
+  const withdrawBtn = $("withdraw-button");
+  try {
+    if (state.nativeBalanceWei <= 0n) {
+      showToast("You have no withdrawable rewards.", "info");
+      return;
+    }
+
+    setButtonLoading(withdrawBtn, true);
+    const tx = await state.contract.withdrawNative();
+    showToast("Withdrawal submitted. Waiting for confirmation…", "info");
+    await tx.wait();
+    showToast("Rewards withdrawn to your wallet.", "success");
+    await loadUserNativeBalance();
+  } catch (err) {
+    console.error(err);
+    showToast(
+      err && err.message ? err.message : "Failed to withdraw rewards.",
+      "error"
+    );
+  } finally {
+    setButtonLoading(withdrawBtn, false, "Withdraw");
+  }
+}
+
+async function onCreateTaskSubmit(event) {
+  event.preventDefault();
+  if (!state.contract || (!state.isOwner && !state.isVerifier)) {
+    showToast("Only owner or verifier can create tasks.", "error");
+    return;
+  }
+
+  const maxInput = $("create-max-participants");
+  const rewardInput = $("create-total-reward");
+  const button = $("create-task-button");
+
+  const maxParticipants = Number(maxInput.value || 0);
+  const rewardEth = Number(rewardInput.value || 0);
+
+  if (!Number.isFinite(maxParticipants) || maxParticipants <= 0) {
+    showToast("Enter a valid max participants value.", "error");
+    return;
+  }
+
+  if (!Number.isFinite(rewardEth) || rewardEth <= 0) {
+    showToast("Enter a valid total reward in ETH.", "error");
+    return;
+  }
+
+  try {
+    const value = ethers.parseEther(rewardEth.toString());
+    setButtonLoading(button, true);
+
+    const tx = await state.contract.createNativeTask(maxParticipants, { value });
+    showToast("Task creation submitted. Waiting for confirmation…", "info");
+    await tx.wait();
+    showToast("Native task created successfully.", "success");
+    maxInput.value = "";
+    rewardInput.value = "";
+    await loadTasks();
+  } catch (err) {
+    console.error(err);
+    showToast(
+      err && err.message ? err.message : "Failed to create native task.",
+      "error"
+    );
+  } finally {
+    setButtonLoading(button, false, "Create task");
+  }
+}
+
+async function onAllocateRewardSubmit(event) {
+  event.preventDefault();
+  if (!state.contract || (!state.isOwner && !state.isVerifier)) {
+    showToast("Only owner or verifier can allocate rewards.", "error");
+    return;
+  }
+
+  const taskIdInput = $("allocate-task-id");
+  const addressInput = $("allocate-user-address");
+  const amountInput = $("allocate-amount");
+  const button = $("allocate-reward-button");
+
+  const taskId = Number(taskIdInput.value || 0);
+  const userAddress = addressInput.value.trim();
+  const amountEth = Number(amountInput.value || 0);
+
+  if (!Number.isFinite(taskId) || taskId < 0) {
+    showToast("Enter a valid task ID.", "error");
+    return;
+  }
+
+  if (!ethers.isAddress(userAddress)) {
+    showToast("Enter a valid participant address.", "error");
+    return;
+  }
+
+  if (!Number.isFinite(amountEth) || amountEth <= 0) {
+    showToast("Enter a valid reward amount in ETH.", "error");
+    return;
+  }
+
+  try {
+    const amountWei = ethers.parseEther(amountEth.toString());
+    setButtonLoading(button, true);
+    const tx = await state.contract.allocateNativeReward(
+      taskId,
+      userAddress,
+      amountWei
+    );
+    showToast("Allocation submitted. Waiting for confirmation…", "info");
+    await tx.wait();
+    showToast("Reward allocated to participant.", "success");
+    taskIdInput.value = "";
+    addressInput.value = "";
+    amountInput.value = "";
+    await loadUserNativeBalance();
+  } catch (err) {
+    console.error(err);
+    showToast(
+      err && err.message ? err.message : "Failed to allocate reward.",
+      "error"
+    );
+  } finally {
+    setButtonLoading(button, false, "Allocate reward");
+  }
 }
 
 // Tabs
 
-function setActiveTab(tab) {
-  const tasksView = document.getElementById("tasksView");
-  const dashView = document.getElementById("dashboardView");
+function setupTabs() {
+  const navItems = document.querySelectorAll(".bottom-nav .nav-item");
+  navItems.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const targetId = btn.dataset.target;
+      if (!targetId) return;
 
-  if (tab === "tasks") {
-    tasksView.classList.add("active");
-    dashView.classList.remove("active");
-  } else {
-    dashView.classList.add("active");
-    tasksView.classList.remove("active");
-  }
+      document
+        .querySelectorAll(".view")
+        .forEach((view) => view.classList.remove("view-active"));
+      $(`${targetId}`).classList.add("view-active");
 
-  document.querySelectorAll(".nav-item").forEach((btn) => {
-    btn.classList.toggle("active", btn.dataset.tab === tab);
+      navItems.forEach((b) => b.classList.remove("nav-item-active"));
+      btn.classList.add("nav-item-active");
+    });
   });
 }
 
-// DOM load
+// Modal events
 
-document.addEventListener("DOMContentLoaded", async () => {
-  await initRead();
-  await loadTasks();
+function setupModalEvents() {
+  const backdrop = $("task-modal");
+  const closeBtn = $("modal-close-button");
+  const verifyBtn = $("modal-verify-button");
 
-  const connectBtn = document.getElementById("connectButton");
-  connectBtn.addEventListener("click", connectWallet);
-
-  const withdrawBtn = document.getElementById("withdrawNativeButton");
-  withdrawBtn.addEventListener("click", withdrawNative);
-
-  const createTaskBtn = document.getElementById("createTaskButton");
-  createTaskBtn.addEventListener("click", createTaskNative);
-
-  const allocBtn = document.getElementById("allocateButton");
-  allocBtn.addEventListener("click", allocateReward);
-
-  // Tabs
-  document.querySelectorAll(".nav-item").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const tab = btn.dataset.tab;
-      setActiveTab(tab);
-    });
+  closeBtn.addEventListener("click", () => closeTaskModal());
+  backdrop.addEventListener("click", (e) => {
+    if (e.target === backdrop) {
+      closeTaskModal();
+    }
   });
 
-  // Modal events
-  document
-    .getElementById("modalCloseButton")
-    .addEventListener("click", closeTaskModal);
-  document
-    .getElementById("taskModal")
-    .addEventListener("click", (e) => {
-      if (e.target.classList.contains("modal-backdrop")) {
-        closeTaskModal();
-      }
-    });
+  verifyBtn.addEventListener("click", () => {
+    if (!state.selectedTask) return;
+    onVerifyClick(state.selectedTask.id);
+  });
 
-  // Wallet events (if wallet changes)
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !backdrop.classList.contains("hidden")) {
+      closeTaskModal();
+    }
+  });
+}
+
+// Event wiring
+
+function setupEventListeners() {
+  $("connect-button").addEventListener("click", () => {
+    connectWallet();
+  });
+
+  $("refresh-tasks").addEventListener("click", () => {
+    if (!state.contract) {
+      showToast("Connect your wallet to refresh tasks.", "info");
+      return;
+    }
+    loadTasks();
+  });
+
+  $("withdraw-button").addEventListener("click", onWithdrawClick);
+  $("create-task-form").addEventListener("submit", onCreateTaskSubmit);
+  $("allocate-reward-form").addEventListener("submit", onAllocateRewardSubmit);
+
   if (window.ethereum) {
     window.ethereum.on("accountsChanged", () => {
       window.location.reload();
@@ -662,4 +802,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       window.location.reload();
     });
   }
+}
+
+// Bootstrap
+
+document.addEventListener("DOMContentLoaded", () => {
+  setupTabs();
+  setupModalEvents();
+  setupEventListeners();
 });
