@@ -1,39 +1,178 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FasterTasks</title>
-
-    <link rel="stylesheet" href="styles.css">
+  <meta charset="UTF-8" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1, maximum-scale=1"
+  />
+  <title>FasterTasks</title>
+  <link rel="stylesheet" href="style.css" />
 </head>
-
 <body>
-
-    <header>
-        <h1>FasterTasks</h1>
-        <button id="connectWalletBtn">Connect Wallet</button>
+  <div class="app-shell">
+    <header class="top-bar">
+      <div class="brand">
+        <div class="brand-icon">⚡</div>
+        <div class="brand-text">
+          <div class="brand-title">FasterTasks</div>
+          <div class="brand-subtitle">On-chain task rewards</div>
+        </div>
+      </div>
+      <button id="connectButton" class="btn btn-primary">
+        Connect wallet
+      </button>
     </header>
 
-    <main>
-        <section class="card">
-            <h2>Create Task</h2>
+    <main class="main-content">
+      <!-- TASKS VIEW -->
+      <section id="tasksView" class="view active">
+        <div class="section-header">
+          <h2>Tasks</h2>
+          <div class="section-subtitle">
+            Choose a task, complete it, then tap verify.
+          </div>
+        </div>
+        <div id="tasksList" class="tasks-grid">
+          <!-- Populated by app.js -->
+        </div>
+        <div id="tasksEmpty" class="empty-state hidden">
+          <div class="empty-title">No tasks yet</div>
+          <div class="empty-subtitle">
+            As soon as tasks are created on-chain, they will appear here.
+          </div>
+        </div>
+      </section>
 
-            <label>Reward Amount (ETH)</label>
-            <input id="rewardInput" type="number" min="0" step="0.0001" placeholder="0.01">
+      <!-- DASHBOARD / REWARDS VIEW -->
+      <section id="dashboardView" class="view">
+        <div class="section-header">
+          <h2>My rewards</h2>
+          <div class="section-subtitle">
+            View your pending balances and withdraw to your wallet.
+          </div>
+        </div>
 
-            <label>Max Participants</label>
-            <input id="maxParticipantsInput" type="number" min="1" placeholder="10">
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">Native rewards (ETH / Base)</div>
+          </div>
+          <div class="card-body">
+            <div class="metric-row">
+              <div class="metric-label">Pending balance</div>
+              <div id="nativeBalance" class="metric-value">0.0</div>
+            </div>
+            <button id="withdrawNativeButton" class="btn btn-primary full-width">
+              Withdraw to wallet
+            </button>
+          </div>
+        </div>
 
-            <button id="createTaskBtn">Create Task</button>
-        </section>
+        <div class="card mt-lg">
+          <div class="card-header">
+            <div class="card-title">Admin actions</div>
+            <div class="card-tag" id="adminRoleTag">Not owner / verifier</div>
+          </div>
+          <div class="card-body admin-grid">
+            <div class="admin-block">
+              <div class="admin-block-title">Create native task</div>
+              <label class="field">
+                <span class="field-label">Max participants</span>
+                <input id="createMaxParticipants" type="number" min="1" step="1" placeholder="e.g. 100" />
+              </label>
+              <label class="field">
+                <span class="field-label">Total reward (ETH)</span>
+                <input id="createTotalEth" type="number" min="0" step="0.0001" placeholder="e.g. 0.5" />
+              </label>
+              <button id="createTaskButton" class="btn btn-secondary full-width">
+                Create task (owner)
+              </button>
+            </div>
 
-        <section class="card">
-            <h2>Withdraw Rewards</h2>
-            <button id="withdrawBtn">Withdraw</button>
-        </section>
+            <div class="admin-block">
+              <div class="admin-block-title">Allocate reward</div>
+              <label class="field">
+                <span class="field-label">Task ID</span>
+                <input id="allocTaskId" type="number" min="0" step="1" placeholder="e.g. 0" />
+              </label>
+              <label class="field">
+                <span class="field-label">User address</span>
+                <input id="allocUser" type="text" placeholder="0x..." />
+              </label>
+              <label class="field">
+                <span class="field-label">Amount (ETH)</span>
+                <input id="allocAmount" type="number" min="0" step="0.0001" placeholder="e.g. 0.01" />
+              </label>
+              <button id="allocateButton" class="btn btn-secondary full-width">
+                Allocate (verifier)
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
     </main>
 
-    <script src="app.js"></script>
+    <!-- BOTTOM TABS -->
+    <nav class="bottom-nav">
+      <button class="nav-item active" data-tab="tasks">
+        <span class="nav-label">Tasks</span>
+      </button>
+      <button class="nav-item" data-tab="dashboard">
+        <span class="nav-label">Rewards</span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- TASK DETAIL MODAL -->
+  <div id="taskModal" class="modal hidden">
+    <div class="modal-backdrop"></div>
+    <div class="modal-content">
+      <div class="modal-header">
+        <div>
+          <div id="modalTokenLabel" class="modal-token-label"></div>
+          <div id="modalRewardLabel" class="modal-reward-label"></div>
+        </div>
+        <button id="modalCloseButton" class="modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="modal-row">
+          <div class="modal-row-label">Task type</div>
+          <div id="modalTaskType" class="modal-row-value"></div>
+        </div>
+        <div class="modal-row">
+          <div class="modal-row-label">How to earn</div>
+          <div id="modalHowToEarn" class="modal-row-value"></div>
+        </div>
+        <div class="modal-row">
+          <div class="modal-row-label">Reward pool remaining</div>
+          <div id="modalRemaining" class="modal-row-value"></div>
+        </div>
+        <div class="modal-row">
+          <div class="modal-row-label">Max participants</div>
+          <div id="modalMaxParticipants" class="modal-row-value"></div>
+        </div>
+        <div class="modal-row">
+          <div class="modal-row-label">Participants paid</div>
+          <div id="modalParticipantsPaid" class="modal-row-value"></div>
+        </div>
+
+        <div class="modal-section-title">Participants (off-chain example)</div>
+        <div id="modalParticipantsList" class="participants-list">
+          <!-- Populated with mock data for now -->
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="modalVerifyButton" class="btn btn-primary full-width">
+          Verify task
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- TOAST -->
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/ethers@6.13.2/dist/ethers.umd.min.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>
