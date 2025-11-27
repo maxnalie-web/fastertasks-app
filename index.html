@@ -4,39 +4,36 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FasterTasks</title>
+
     <link rel="stylesheet" href="styles.css">
 </head>
+
 <body>
 
-<div class="container">
-    <h1>FasterTasks</h1>
-    <button id="connectBtn" class="btn">Connect Wallet</button>
+    <header>
+        <h1>FasterTasks</h1>
+        <button id="connectWalletBtn">Connect Wallet</button>
+    </header>
 
-    <div id="walletAddress" class="info"></div>
+    <main>
+        <section class="card">
+            <h2>Create Task</h2>
 
-    <hr>
+            <label>Reward Amount (ETH)</label>
+            <input id="rewardInput" type="number" min="0" step="0.0001" placeholder="0.01">
 
-    <h2>Create Task (Native)</h2>
-    <input type="number" id="nativeMax" placeholder="Max participants">
-    <input type="number" id="nativeValue" placeholder="Send ETH value">
-    <button id="nativeBtn" class="btn">Create Native Task</button>
+            <label>Max Participants</label>
+            <input id="maxParticipantsInput" type="number" min="1" placeholder="10">
 
-    <hr>
+            <button id="createTaskBtn">Create Task</button>
+        </section>
 
-    <h2>Create Task (ERC20)</h2>
-    <input type="text" id="erc20Token" placeholder="Token Address">
-    <input type="number" id="erc20Amount" placeholder="Total Amount">
-    <input type="number" id="erc20Max" placeholder="Max participants">
-    <button id="erc20Btn" class="btn">Create ERC20 Task</button>
+        <section class="card">
+            <h2>Withdraw Rewards</h2>
+            <button id="withdrawBtn">Withdraw</button>
+        </section>
+    </main>
 
-    <hr>
-
-    <h2>Withdraw</h2>
-    <button id="withdrawNative" class="btn">Withdraw Native</button>
-
-</div>
-
-<script src="https://cdn.jsdelivr.net/npm/ethers@6.7.0/dist/ethers.min.js"></script>
-<script src="app.js"></script>
+    <script src="app.js"></script>
 </body>
 </html>
